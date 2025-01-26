@@ -1,0 +1,1 @@
+Script to check for IMDSv1 usage by ec2 instances across all accessible regions in your AWS account. Requires assuming a role or AWS creds with read permissions when running. 
