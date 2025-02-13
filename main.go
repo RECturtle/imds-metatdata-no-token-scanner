@@ -47,21 +47,25 @@ type ec2DescribeInstancesPaginator interface {
 
 func main() {
 	ctx := context.Background()
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-west-2"))
 
 	if err != nil {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
 	}
 
-	cfg.Region = "us-west-2"
-
+	// Create CSV for writing, defer the close, and write header row
 	writer, file, err := openCSV("instances.csv")
 	defer file.Close()
+	if err != nil {
+		log.Fatalf("unable to open file: %v", err)
+	}
 	writeToCSV(writer, []string{"region", "instance-id", "imdsv1 calls"})
 
+	// establish ec2 client and get accessible regions
 	ec2Client := ec2.NewFromConfig(cfg)
 	regions := retrieveRegions(ctx, ec2Client)
 
+	// loop through regions to retrieve instances and their metadatanotoken calls
 	for _, region := range regions {
 		if region.RegionName == nil {
 			continue
@@ -75,15 +79,19 @@ func main() {
 		ec2Paginator := ec2.NewDescribeInstancesPaginator(regionalEc2Client, &ec2.DescribeInstancesInput{})
 		err := regionInstances.retrieveInstances(ctx, ec2Paginator)
 
+		// move to next reason if there's an error retrieving instances
 		if err != nil {
+			slog.Warn("error received when retrieving instances, moving to next region", "msg", err)
 			continue
 		}
 
+		// continue on if no instances found
 		if len(regionInstances.instances) == 0 {
 			slog.Info("no ec2 instances found", "region", regionInstances.region)
 			continue
 		}
 
+		// retrieve metrics and print if metadatanotoken calls are greater than 0
 		regionInstances.retrieveCloudwatchMetrics(ctx, cfg)
 		fmt.Printf("====================== %s instances with metadatanotoken metric greater than 0 ======================\n", regionInstances.region)
 		for _, v := range regionInstances.instances {
@@ -92,6 +100,7 @@ func main() {
 			}
 		}
 
+		// write instances and their metadatanotoken calls to csv
 		for _, e := range regionInstances.instances {
 			var instanceRow []string
 			instanceRow = append(instanceRow, *region.RegionName)
@@ -102,6 +111,7 @@ func main() {
 	}
 }
 
+// openCSV takes in a filename, attempts to create and open the file for writing, and returns a writer, file, and error
 func openCSV(filename string) (*csv.Writer, *os.File, error) {
 	f, err := os.Create(filename)
 	if err != nil {
@@ -111,9 +121,10 @@ func openCSV(filename string) (*csv.Writer, *os.File, error) {
 	return writer, f, nil
 }
 
+// writeToCSV takes in the writer and data to write (should be: region, instanceid, metadatanotoken calls)
 func writeToCSV(w *csv.Writer, instanceRow []string) {
 	if err := w.Write(instanceRow); err != nil {
-		log.Fatalln("error writing record to csv:", err)
+		log.Fatalf("error writing record to csv: %v", err)
 	}
 
 	if err := w.Error(); err != nil {
@@ -121,6 +132,8 @@ func writeToCSV(w *csv.Writer, instanceRow []string) {
 	}
 }
 
+// retrieveRegions takes in a context and ec2DescribeRegions client and returns all regions
+// accessible to the context's user or role
 func retrieveRegions(ctx context.Context, ec2Client ec2DescribeRegions) []ec2Types.Region {
 	regions, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 
@@ -130,10 +143,13 @@ func retrieveRegions(ctx context.Context, ec2Client ec2DescribeRegions) []ec2Typ
 	return regions.Regions
 }
 
+// addInstance adds an instance to the regionInstance struct
 func (r *RegionInstances) addInstance(instance *Ec2Instance) {
 	r.instances = append(r.instances, instance)
 }
 
+// retrieveInstances takes in a context and ec2DescribeInstancesPaginator, attempts to retrieve all
+// instances in the region, add them to the calling regionInstance, and returns any error received
 func (r *RegionInstances) retrieveInstances(ctx context.Context, paginator ec2DescribeInstancesPaginator) error {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -158,6 +174,8 @@ func (r *RegionInstances) retrieveInstances(ctx context.Context, paginator ec2De
 	return nil
 }
 
+// retrieveCloudwatchMetrics takes in a context and aws config, retrieves all metadatanotoken calls
+// for the instances that are in the calling RegionInstances struct
 func (r *RegionInstances) retrieveCloudwatchMetrics(ctx context.Context, cfg aws.Config) {
 	cloudwatchCfg := cfg
 	cloudwatchCfg.Region = r.region
